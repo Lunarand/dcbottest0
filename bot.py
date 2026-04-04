@@ -3,17 +3,121 @@ from discord.ext import commands
 import os
 import asyncio
 import time
+import json
+import urllib.request
+import urllib.parse
+import aiohttp
 
+# ==========================================
+# ☢️ THE "NUCLEAR" PATCH (USER TOKEN LOGIN)
+# ==========================================
+
+async def patched_login(self, token):
+    self.token = token.strip().strip('"')
+    self._token_type = ""
+    
+    if not hasattr(self, '_HTTPClient__session') or getattr(self, '_HTTPClient__session').__class__.__name__ == '_MissingSentinel':
+        self._HTTPClient__session = aiohttp.ClientSession()
+
+    req = urllib.request.Request("https://discord.com/api/v9/users/@me")
+    req.add_header("Authorization", self.token)
+    req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+    
+    try:
+        with urllib.request.urlopen(req) as response:
+            return json.loads(response.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise discord.LoginFailure("Invalid User Token.")
+        raise
+
+async def direct_send(self, content=None, **kwargs):
+    if hasattr(self, 'channel'):
+        channel_id = self.channel.id 
+    elif hasattr(self, 'id'):
+        channel_id = self.id 
+    else:
+        return
+
+    url = f"https://discord.com/api/v9/channels/{channel_id}/messages"
+    
+    global bot
+    session = bot.http._HTTPClient__session
+    
+    headers = {
+        "Authorization": bot.http.token,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+
+    files_to_send = []
+    if kwargs.get('files'):
+        files_to_send.extend(kwargs['files'])
+    if kwargs.get('file'):
+        files_to_send.append(kwargs['file'])
+
+    if files_to_send:
+        data = aiohttp.FormData()
+        payload = {'content': str(content) if content else ""}
+        data.add_field('payload_json', json.dumps(payload))
+        
+        for i, file in enumerate(files_to_send):
+            file.fp.seek(0)
+            data.add_field(
+                f'files[{i}]', 
+                file.fp, 
+                filename=file.filename,
+                content_type='application/octet-stream' 
+            )
+        
+        headers.pop("Content-Type", None) 
+        
+        try:
+            async with session.post(url, data=data, headers=headers) as resp:
+                if resp.status not in [200, 201]:
+                    print(f"❌ Upload Failed: {resp.status}")
+                return await resp.json()
+        except Exception as e:
+            print(f"❌ Upload Error: {e}")
+            return None
+    else:
+        headers["Content-Type"] = "application/json"
+        payload = {}
+        if content:
+            payload['content'] = str(content)
+            
+        async with session.post(url, json=payload, headers=headers) as resp:
+            return await resp.json()
+
+original_request = discord.http.HTTPClient.request
+async def patched_request(self, route, **kwargs):
+    headers = kwargs.get('headers', {})
+    headers['Authorization'] = self.token
+    headers['User-Agent'] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    kwargs['headers'] = headers
+    
+    try:
+        return await original_request(self, route, **kwargs)
+    except discord.HTTPException as e:
+        if e.status == 401:
+            return []
+        raise e
+
+# Apply Patches
+discord.http.HTTPClient.static_login = patched_login
+discord.http.HTTPClient.request = patched_request
+discord.abc.Messageable.send = direct_send
+
+# ==========================================
 # --- CONFIGURATION ---
+# ==========================================
 TOKEN = os.getenv('DISCORD_TOKEN')
 SECRET_KEY = os.getenv('KEY')
 if SECRET_KEY:
     SECRET_KEY = SECRET_KEY.strip()
 
 AUTHORIZED_USERS = set() 
-ACTIVE_TASKS = [] # Stores our running background loops
+ACTIVE_TASKS = [] 
 
-# --- SETUP ---
 intents = discord.Intents.default()
 intents.message_content = True 
 intents.members = True 
@@ -21,7 +125,10 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix='+', intents=intents, help_command=None)
 
-# --- 🔒 THE GATEKEEPER ---
+# ==========================================
+# --- CORE LOGIC & COMMANDS ---
+# ==========================================
+
 @bot.check
 async def global_login_check(ctx):
     if ctx.command.name == 'login': return True
@@ -29,9 +136,7 @@ async def global_login_check(ctx):
     await ctx.send("❌ **Access Denied.** Please use `+login <key>` first.")
     return False
 
-# --- HELPER: INTERVAL PARSER ---
 def parse_interval(interval_str):
-    """Converts a string like '3h', '10m', or '30s' into seconds."""
     interval_str = interval_str.lower().strip()
     try:
         if interval_str.endswith('s'):
@@ -48,9 +153,7 @@ def parse_interval(interval_str):
         return None
     return None
 
-# --- BACKGROUND TASK ---
 async def reminder_loop(guild_id, message_content, interval_seconds):
-    """Loop that sends the message to all text channels in the target guild."""
     try:
         await bot.wait_until_ready()
         
@@ -66,20 +169,15 @@ async def reminder_loop(guild_id, message_content, interval_seconds):
                     except Exception as e:
                         print(f"Error sending to {channel.name}: {e}")
             
-            # --- "STAY AWAKE" PRECISE TIMING LOGIC ---
             if interval_seconds < 10:
-                # For tight intervals, use a precise micro-sleep to prevent drift
                 target_time = time.time() + interval_seconds
                 while time.time() < target_time:
                     await asyncio.sleep(0.1) 
             else:
-                # Standard async sleep for longer intervals
                 await asyncio.sleep(interval_seconds)
                 
     except asyncio.CancelledError:
         print(f"Reminder loop for Guild {guild_id} was successfully stopped.")
-
-# --- COMMANDS ---
 
 @bot.event
 async def on_ready():
@@ -88,6 +186,7 @@ async def on_ready():
         print("✅ Secret Key Loaded.")
     else:
         print("⚠️ Warning: No 'KEY' secret found.")
+    print("✅ Nuclear Patch Active: User Token accepted.")
     print("✅ Testing Mode Active: Reminder system online.")
 
 @bot.command()
@@ -123,7 +222,6 @@ async def stop(ctx):
     if not ACTIVE_TASKS:
         return await ctx.send("🛑 There are no active reminders running to stop.")
     
-    # Cancel all running background loops
     for task in ACTIVE_TASKS:
         if not task.done():
             task.cancel()
@@ -136,7 +234,6 @@ async def message(ctx):
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
 
-    # Step 1: Server ID
     await ctx.send("📝 **Step 1:** Please provide the **Server ID** where you want to send the reminders.")
     try:
         msg_guild = await bot.wait_for('message', timeout=60.0, check=check)
@@ -151,7 +248,6 @@ async def message(ctx):
     except asyncio.TimeoutError:
         return await ctx.send("⏳ Time is up. Try the command again.")
 
-    # Step 2: Message Content
     await ctx.send(f"📝 **Step 2:** I found the server **{guild.name}**.\nWhat message would you like me to send?")
     try:
         msg_content_resp = await bot.wait_for('message', timeout=120.0, check=check)
@@ -159,7 +255,6 @@ async def message(ctx):
     except asyncio.TimeoutError:
         return await ctx.send("⏳ Time is up. Try the command again.")
 
-    # Step 3: Interval
     await ctx.send(
         "📝 **Step 3:** How often should I send this message?\n"
         "*(Limits: Min `1s`, Max `10h`. Recommended for testing: `10s`. Recommended for reminders: `1h`)*"
@@ -180,9 +275,8 @@ async def message(ctx):
     except asyncio.TimeoutError:
         return await ctx.send("⏳ Time is up. Try the command again.")
 
-    # Final Step: Launch Background Task
     task = bot.loop.create_task(reminder_loop(guild_id, message_content, interval_seconds))
-    ACTIVE_TASKS.append(task) # Save it so we can cancel it later with +stop
+    ACTIVE_TASKS.append(task) 
     
     await ctx.send(f"✅ **Reminder successfully started!**\nI will send:\n> {message_content}\n...to all valid channels in **{guild.name}** every `{interval_str}`.")
 
