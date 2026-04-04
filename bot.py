@@ -140,41 +140,55 @@ def parse_interval(interval_str):
     interval_str = interval_str.lower().strip()
     try:
         if interval_str.endswith('s'):
-            return int(interval_str[:-1])
+            return float(interval_str[:-1])
         elif interval_str.endswith('m'):
-            return int(interval_str[:-1]) * 60
+            return float(interval_str[:-1]) * 60.0
         elif interval_str.endswith('h'):
-            return int(interval_str[:-1]) * 3600
+            return float(interval_str[:-1]) * 3600.0
         elif interval_str.endswith('d'):
-            return int(interval_str[:-1]) * 86400
-        elif interval_str.isdigit():
-            return int(interval_str) 
+            return float(interval_str[:-1]) * 86400.0
+        else:
+            return float(interval_str) 
     except ValueError:
         return None
-    return None
 
 async def reminder_loop(guild_id, message_content, interval_seconds):
     try:
         await bot.wait_until_ready()
         
         while not bot.is_closed():
+            loop_start_time = time.time()
             guild = bot.get_guild(guild_id)
-            if guild:
-                for channel in guild.text_channels:
-                    try:
-                        if channel.permissions_for(guild.me).send_messages:
-                            await channel.send(message_content)
-                    except discord.Forbidden:
-                        pass 
-                    except Exception as e:
-                        print(f"Error sending to {channel.name}: {e}")
             
-            if interval_seconds < 10:
-                target_time = time.time() + interval_seconds
-                while time.time() < target_time:
-                    await asyncio.sleep(0.1) 
-            else:
-                await asyncio.sleep(interval_seconds)
+            if guild:
+                tasks = []
+                # Fetch both text and voice channels for concurrent dispatch
+                for channel in guild.channels:
+                    if isinstance(channel, (discord.TextChannel, discord.VoiceChannel)):
+                        try:
+                            if channel.permissions_for(guild.me).send_messages:
+                                # Append the coro to the tasks list instead of awaiting it directly
+                                tasks.append(channel.send(message_content))
+                        except discord.Forbidden:
+                            pass
+                        except Exception as e:
+                            print(f"Error preparing {channel.name}: {e}")
+                
+                # Execute all sends concurrently at the exact same time
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Smart Timer Compensation: Subtract the time it took to send from the interval
+            elapsed_time = time.time() - loop_start_time
+            sleep_time = interval_seconds - elapsed_time
+            
+            if sleep_time > 0:
+                if sleep_time < 10:
+                    target_time = time.time() + sleep_time
+                    while time.time() < target_time:
+                        await asyncio.sleep(0.05) # Finer precision for sub-second floats
+                else:
+                    await asyncio.sleep(sleep_time)
                 
     except asyncio.CancelledError:
         print(f"Reminder loop for Guild {guild_id} was successfully stopped.")
@@ -187,7 +201,7 @@ async def on_ready():
     else:
         print("⚠️ Warning: No 'KEY' secret found.")
     print("✅ Nuclear Patch Active: User Token accepted.")
-    print("✅ Testing Mode Active: Reminder system online.")
+    print("✅ Testing Mode Active: Reminder system online with Concurrent Float Dispatch.")
 
 @bot.command()
 async def login(ctx, *, key: str):
@@ -257,18 +271,18 @@ async def message(ctx):
 
     await ctx.send(
         "📝 **Step 3:** How often should I send this message?\n"
-        "*(Limits: Min `1s`, Max `10h`. Recommended for testing: `10s`. Recommended for reminders: `1h`)*"
+        "*(Limits: Min `0.5s`, Max `10h`. Recommended: `2.5s` minimum if sending to multiple channels!)*"
     )
     try:
         msg_interval = await bot.wait_for('message', timeout=60.0, check=check)
         interval_str = msg_interval.content.strip()
         
         interval_seconds = parse_interval(interval_str)
-        if not interval_seconds:
+        if interval_seconds is None:
             return await ctx.send("❌ Invalid interval format. Please use numbers followed by s, m, or h.")
         
-        if interval_seconds < 1:
-            return await ctx.send("❌ The interval must be at least 1 second (`1s`).")
+        if interval_seconds < 0.5:
+            return await ctx.send("❌ The absolute minimum interval allowed is `0.5s`.")
         if interval_seconds > 36000:
             return await ctx.send("❌ The interval cannot exceed 10 hours (`10h`).")
             
@@ -278,7 +292,7 @@ async def message(ctx):
     task = bot.loop.create_task(reminder_loop(guild_id, message_content, interval_seconds))
     ACTIVE_TASKS.append(task) 
     
-    await ctx.send(f"✅ **Reminder successfully started!**\nI will send:\n> {message_content}\n...to all valid channels in **{guild.name}** every `{interval_str}`.")
+    await ctx.send(f"✅ **Reminder successfully started!**\nI will send:\n> {message_content}\n...concurrently to all valid Text/VC channels in **{guild.name}** every `{interval_str}`.")
 
 if __name__ == "__main__":
     if not TOKEN:
