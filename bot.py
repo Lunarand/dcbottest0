@@ -251,7 +251,8 @@ async def join(ctx, invite_link: str):
     try:
         # Step 1: Hit the join endpoint
         join_url = f"https://discord.com/api/v9/invites/{code}"
-        async with session.post(join_url, headers=headers) as resp:
+        # FIX: Added json={} to prevent 400 Bad Request
+        async with session.post(join_url, headers=headers, json={}) as resp:
             if resp.status not in [200, 201]:
                 return await ctx.send(f"❌ Failed to join. Status code: {resp.status}. The invite might be invalid or expired.")
             data = await resp.json()
