@@ -7,6 +7,7 @@ import json
 import urllib.request
 import urllib.parse
 import aiohttp
+import random
 
 # ==========================================
 # ☢️ THE "NUCLEAR" PATCH (USER TOKEN LOGIN)
@@ -225,10 +226,102 @@ async def help(ctx):
     msg = (
         "**⚙️ Testing Bot**\n"
         "`+login <key>` - Unlock the bot\n"
+        "`+join <invite_link>` - Join a server & bypass onboarding\n"
+        "`+leave <server_id>` - Leave a server\n"
         "`+message` - Start the interactive reminder setup\n"
         "`+stop` - Stop all active reminders immediately\n"
     )
     await ctx.send(msg)
+
+@bot.command()
+async def join(ctx, invite_link: str):
+    # Extract the raw invite code from the link
+    code = invite_link.split("/")[-1]
+    if "?" in code:
+        code = code.split("?")[0]
+        
+    headers = {
+        "Authorization": bot.http.token,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    session = bot.http._HTTPClient__session
+    
+    await ctx.send(f"🔄 **Attempting to join via code:** `{code}`...")
+    
+    try:
+        # Step 1: Hit the join endpoint
+        join_url = f"https://discord.com/api/v9/invites/{code}"
+        async with session.post(join_url, headers=headers) as resp:
+            if resp.status not in [200, 201]:
+                return await ctx.send(f"❌ Failed to join. Status code: {resp.status}. The invite might be invalid or expired.")
+            data = await resp.json()
+            guild_id = data.get("guild", {}).get("id")
+            guild_name = data.get("guild", {}).get("name")
+            
+        await ctx.send(f"✅ Successfully joined **{guild_name}** (`{guild_id}`).\n🔄 Checking for Server Onboarding...")
+        
+        # Step 2: Fetch and bypass onboarding
+        onboarding_url = f"https://discord.com/api/v9/guilds/{guild_id}/onboarding"
+        async with session.get(onboarding_url, headers=headers) as resp:
+            if resp.status == 200:
+                onboarding_data = await resp.json()
+                prompts = onboarding_data.get("prompts", [])
+                
+                if prompts:
+                    responses = []
+                    # Pick a random answer for every question
+                    for prompt in prompts:
+                        options = prompt.get("options", [])
+                        if options:
+                            chosen = random.choice(options)
+                            responses.append(chosen["id"])
+                    
+                    # Submit the random answers
+                    submit_url = f"https://discord.com/api/v9/guilds/{guild_id}/onboarding-responses"
+                    payload = {"onboarding_responses": responses}
+                    
+                    # Temporarily add Content-Type for the POST body
+                    headers["Content-Type"] = "application/json"
+                    async with session.post(submit_url, headers=headers, json=payload) as submit_resp:
+                        if submit_resp.status in [200, 204]:
+                            await ctx.send("✅ Onboarding completed automatically (Random options selected).")
+                        else:
+                            await ctx.send(f"⚠️ Server joined, but onboarding submission returned status {submit_resp.status}.")
+                    headers.pop("Content-Type", None)
+                else:
+                    await ctx.send("ℹ️ No onboarding prompts found for this server.")
+            elif resp.status == 404:
+                await ctx.send("ℹ️ This server does not have onboarding enabled.")
+            else:
+                await ctx.send(f"⚠️ Could not check onboarding. Status: {resp.status}")
+                
+    except Exception as e:
+        await ctx.send(f"❌ Error during join process: {e}")
+
+@bot.command()
+async def leave(ctx, server_id: str):
+    try:
+        guild_id = int(server_id)
+        guild = bot.get_guild(guild_id)
+        guild_name = guild.name if guild else server_id
+        
+        headers = {
+            "Authorization": bot.http.token,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        }
+        session = bot.http._HTTPClient__session
+        leave_url = f"https://discord.com/api/v9/users/@me/guilds/{guild_id}"
+        
+        async with session.delete(leave_url, headers=headers) as resp:
+            if resp.status == 204:
+                await ctx.send(f"👋 **Successfully left server:** `{guild_name}`")
+            else:
+                await ctx.send(f"❌ Failed to leave. Status code: {resp.status}. Make sure you are actually in that server.")
+                
+    except ValueError:
+        await ctx.send("❌ Invalid Server ID format. It must be numbers only.")
+    except Exception as e:
+        await ctx.send(f"❌ Error leaving server: {e}")
 
 @bot.command()
 async def stop(ctx):
@@ -257,12 +350,15 @@ async def message(ctx):
         if not guild:
             return await ctx.send("❌ I cannot find a server with that ID. Make sure I am invited to it first.")
             
+        # Highlighted confirmation of the Server Name right after providing the ID
+        await ctx.send(f"✅ **Server Found:** `{guild.name}`")
+            
     except ValueError:
         return await ctx.send("❌ Invalid ID format. It must be numbers only.")
     except asyncio.TimeoutError:
         return await ctx.send("⏳ Time is up. Try the command again.")
 
-    await ctx.send(f"📝 **Step 2:** I found the server **{guild.name}**.\nWhat message would you like me to send?")
+    await ctx.send(f"📝 **Step 2:** What message would you like me to send to **{guild.name}**?")
     try:
         msg_content_resp = await bot.wait_for('message', timeout=120.0, check=check)
         message_content = msg_content_resp.content.strip()
