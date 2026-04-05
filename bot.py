@@ -242,7 +242,9 @@ async def join(ctx, invite_link: str):
         
     headers = {
         "Authorization": bot.http.token,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Content-Type": "application/json",
+        "Accept": "*/*"
     }
     session = bot.http._HTTPClient__session
     
@@ -251,10 +253,18 @@ async def join(ctx, invite_link: str):
     try:
         # Step 1: Hit the join endpoint
         join_url = f"https://discord.com/api/v9/invites/{code}"
-        # FIX: Added json={} to prevent 400 Bad Request
-        async with session.post(join_url, headers=headers, json={}) as resp:
+        
+        # Add a fake session_id to bypass basic anti-spam
+        payload = {"session_id": os.urandom(16).hex()}
+        
+        async with session.post(join_url, headers=headers, json=payload) as resp:
             if resp.status not in [200, 201]:
-                return await ctx.send(f"❌ Failed to join. Status code: {resp.status}. The invite might be invalid or expired.")
+                # Grab the exact error message from Discord
+                error_msg = await resp.text()
+                if "captcha" in error_msg.lower():
+                    return await ctx.send(f"❌ **Failed: CAPTCHA Required.** Discord blocked this automated join. Try joining manually.\nStatus: {resp.status}")
+                return await ctx.send(f"❌ Failed to join. Status code: {resp.status}.\n**Error Details:** `{error_msg[:500]}`")
+                
             data = await resp.json()
             guild_id = data.get("guild", {}).get("id")
             guild_name = data.get("guild", {}).get("name")
@@ -279,16 +289,13 @@ async def join(ctx, invite_link: str):
                     
                     # Submit the random answers
                     submit_url = f"https://discord.com/api/v9/guilds/{guild_id}/onboarding-responses"
-                    payload = {"onboarding_responses": responses}
+                    submit_payload = {"onboarding_responses": responses}
                     
-                    # Temporarily add Content-Type for the POST body
-                    headers["Content-Type"] = "application/json"
-                    async with session.post(submit_url, headers=headers, json=payload) as submit_resp:
+                    async with session.post(submit_url, headers=headers, json=submit_payload) as submit_resp:
                         if submit_resp.status in [200, 204]:
                             await ctx.send("✅ Onboarding completed automatically (Random options selected).")
                         else:
                             await ctx.send(f"⚠️ Server joined, but onboarding submission returned status {submit_resp.status}.")
-                    headers.pop("Content-Type", None)
                 else:
                     await ctx.send("ℹ️ No onboarding prompts found for this server.")
             elif resp.status == 404:
